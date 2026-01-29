@@ -304,6 +304,141 @@ with DAG(
     collect_task >> clean_task >> save_task
 ```
 
+### Airflow 병렬 처리 패턴 (Dynamic Task Mapping)
+
+**여러 데이터 소스를 동시에 처리하는 경우 권장 패턴:**
+
+```python
+from airflow.decorators import dag, task
+from datetime import datetime
+from typing import Dict, List
+
+@dag(
+    schedule_interval='@daily',
+    start_date=datetime(2026, 1, 1),
+    catchup=False,
+    tags=['parallel', 'etl', 'llm']
+)
+def parallel_data_pipeline():
+    """여러 데이터 소스를 병렬로 처리하는 파이프라인"""
+    
+    @task
+    def get_data_sources() -> List[Dict[str, str]]:
+        """처리할 데이터 소스 리스트 반환
+        
+        Returns:
+            데이터 소스 정보 리스트
+        """
+        return [
+            {"name": "review", "task_file": "review_task.yaml"},
+            {"name": "order", "task_file": "order_task.yaml"},
+            {"name": "article", "task_file": "article_task.yaml"}
+        ]
+    
+    @task(pool='collector_pool')  # 동시 실행 수 제한
+    def collect(source: Dict[str, str]) -> str:
+        """데이터 수집
+        
+        Args:
+            source: 데이터 소스 정보
+            
+        Returns:
+            저장된 Parquet 파일 경로
+        """
+        from src.collector import get_collector
+        
+        collector = get_collector(source['name'])
+        parquet_path = collector.collect()
+        
+        return parquet_path
+    
+    @task(pool='llm_pool')  # LLM API 호출 제한
+    def clean(source: Dict[str, str], raw_path: str) -> str:
+        """LLM 기반 데이터 정제
+        
+        Args:
+            source: 데이터 소스 정보
+            raw_path: 원본 Parquet 파일 경로
+            
+        Returns:
+            정제된 Parquet 파일 경로
+        """
+        from src.cleaners.llm_cleaner import clean_data_with_llm
+        
+        cleaned_path = clean_data_with_llm(raw_path, source['task_file'])
+        return cleaned_path
+    
+    @task
+    def save(source: Dict[str, str], cleaned_path: str) -> str:
+        """CSV 저장
+        
+        Args:
+            source: 데이터 소스 정보
+            cleaned_path: 정제된 Parquet 파일 경로
+            
+        Returns:
+            저장된 CSV 파일 경로
+        """
+        from src.loaders.csv_loader import parquet_to_csv
+        
+        output_name = source['name']
+        csv_path = parquet_to_csv(cleaned_path, output_name)
+        
+        return csv_path
+    
+    # 병렬 실행 플로우
+    sources = get_data_sources()
+    
+    # expand()를 사용하여 각 데이터 소스마다 Task 생성
+    raw_paths = collect.expand(source=sources)
+    cleaned_paths = clean.expand(source=sources, raw_path=raw_paths)
+    csv_paths = save.expand(source=sources, cleaned_path=cleaned_paths)
+    
+    # 의존성은 자동으로 설정됨
+    # collect[각 소스] → clean[각 소스] → save[각 소스]
+
+# DAG 인스턴스 생성
+parallel_dag = parallel_data_pipeline()
+```
+
+**실행 흐름:**
+```
+get_data_sources() → 3개 소스 반환
+    ↓
+collect[review]  ━┓
+collect[order]   ━╋━ 동시 실행 (병렬)
+collect[article] ━┛
+    ↓
+clean[review]    ━┓
+clean[order]     ━╋━ 동시 실행 (병렬)
+clean[article]   ━┛
+    ↓
+save[review]     ━┓
+save[order]      ━╋━ 동시 실행 (병렬)
+save[article]    ━┛
+    ↓
+reviews.csv, orders.csv, articles.csv 생성
+```
+
+**Pool 설정 (리소스 제한):**
+```bash
+# Airflow CLI로 Pool 생성
+airflow pools set collector_pool 3 "데이터 수집 동시 실행 제한"
+airflow pools set llm_pool 5 "LLM API 호출 동시 실행 제한"
+```
+
+**에러 격리:**
+- 각 데이터 소스는 독립적인 Task로 실행
+- 하나의 소스 실패 시 다른 소스에 영향 없음
+- 실패한 소스만 선택적으로 재실행 가능
+
+```bash
+# 특정 소스만 재실행
+airflow tasks clear parallel_data_pipeline \
+  --task-regex ".*\[order\].*" \
+  --dag-run-id manual_20260128
+```
+
 ### LLM API 클라이언트 예시
 ```python
 import os
