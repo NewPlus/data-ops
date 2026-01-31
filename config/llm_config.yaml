@@ -1,0 +1,14 @@
+# LLM 설정 예시 파일
+# resources/ 폴더에 복사하여 사용하세요
+
+llm:
+  provider: "openai"  # openai, anthropic
+  model: "gpt-4"
+  temperature: 0.3
+  max_tokens: 2000
+
+retry:
+  max_attempts: 3
+  backoff_multiplier: 2
+  min_wait_seconds: 1
+  max_wait_seconds: 10

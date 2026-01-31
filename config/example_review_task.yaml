@@ -1,0 +1,54 @@
+# Task 파일 예시 - 고객 리뷰 정제
+# 실제 사용 시 resources/ 폴더에 복사하여 사용하세요
+
+task_name: "고객_리뷰_테이블_변환"
+description: "비정형 고객 리뷰 텍스트를 구조화된 테이블로 변환"
+
+system_message: |
+  당신은 비정형 데이터를 분석하여 구조화된 테이블 형태로 변환하는 전문가입니다.
+  주어진 데이터에서 정확하게 정보를 추출하고 일관된 형식으로 정리해주세요.
+
+prompt: |
+  다음 고객 리뷰 데이터를 분석하여 아래 스키마에 맞게 정보를 추출해주세요.
+  
+  [데이터]
+  {raw_data}
+  
+  [추출 규칙]
+  {extraction_rules}
+  
+  JSON 형식으로만 응답해주세요.
+
+output_schema:
+  - column_name: "customer_name"
+    data_type: "string"
+    extraction_rule: "고객 이름을 추출합니다. 없으면 '익명'으로 표시"
+    required: false
+    
+  - column_name: "rating"
+    data_type: "integer"
+    extraction_rule: "별점을 1-5 사이의 정수로 변환합니다. 별 개수나 점수 표현을 찾아 변환"
+    required: true
+    
+  - column_name: "review_text"
+    data_type: "string"
+    extraction_rule: "리뷰 본문을 정제합니다. 욕설 제거, 맞춤법 교정"
+    required: true
+    
+  - column_name: "sentiment"
+    data_type: "string"
+    extraction_rule: "감정을 '긍정', '부정', '중립' 중 하나로 분류"
+    required: true
+
+validation_rules:
+  - rule: "rating은 1-5 사이의 정수"
+    severity: "error"
+  - rule: "review_text는 비어있으면 안됨"
+    severity: "error"
+  - rule: "sentiment는 '긍정', '부정', '중립' 중 하나"
+    severity: "error"
+
+llm_config:
+  model: "gpt-4"
+  temperature: 0.3
+  max_tokens: 1500
