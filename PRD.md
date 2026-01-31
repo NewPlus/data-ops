@@ -278,8 +278,8 @@ output_schema:
 - **세부사항**:
   - `src/collector/` 폴더에 새로운 Collector 클래스 추가
   - BaseCollector 인터페이스 구현 (collect 메서드 필수)
-  - DataFrame 형태로 데이터 반환
-  - `data/raw/` 폴더에 Parquet 형식으로 자동 저장
+  - JSON 직렬화 가능한 레코드 목록 반환
+  - 수집 결과는 다음 Task로 JSON 형태로 전달
 
 #### FR-002: LLM 기반 자동 테이블 구조화
 - **설명**: 비정형 데이터(텍스트, JSON, HTML 등)를 LLM을 활용하여 자동으로 테이블 형태로 변환
@@ -438,20 +438,18 @@ collect_task = PythonOperator(
 #### 기본 파이프라인 구조
 
 1. **수집 단계 (Collection)**
-   - `src/collector/` 모듈이 외부 데이터 소스에서 데이터 수집
-   - DataFrame으로 변환 후 `data/raw/` 폴더에 Parquet 저장
-   - 파일명 패턴: `{source_name}_{timestamp}.parquet`
+  - `src/collector/` 모듈이 외부 데이터 소스에서 데이터 수집
+  - JSON 직렬화 가능한 레코드 목록으로 반환
+  - 다음 단계로 JSON 형태 전달
 
 2. **정제 단계 (Cleaning)**
-   - `data/raw/` Parquet 파일 읽기
-   - `resources/` task 파일 기반으로 LLM API 호출
-   - 정제된 데이터를 `data/processed/` 폴더에 Parquet 저장
-   - 파일명 패턴: `cleaned_{source_name}_{timestamp}.parquet`
+  - 수집 단계 JSON 레코드를 입력으로 사용
+  - `resources/` task 파일 기반으로 LLM API 호출
+  - 정제 결과를 JSON 레코드 또는 표준 테이블 구조로 변환
 
 3. **저장 단계 (Loading)**
-   - `data/processed/` Parquet 파일 읽기
-   - CSV로 변환하여 `data/output/` 폴더에 저장
-   - 파일명 패턴: `{source_name}_{timestamp}.csv`
+  - 정제 결과를 CSV로 변환하여 `data/output/` 폴더에 저장
+  - 파일명 패턴: `{source_name}_{timestamp}.csv`
 
 #### 병렬 처리 플로우
 
@@ -489,28 +487,28 @@ collect_task = PythonOperator(
 ```python
 # Task 1: 수집
 def collect_data(**context):
-    filepath = "data/raw/source_a_20260128.parquet"
-    # 다음 Task에 경로 전달
-    context['ti'].xcom_push(key='raw_parquet_path', value=filepath)
-    return filepath
+  records = [{"ticker": "AAPL", "market_price": 100.0}]
+  # 다음 Task에 JSON 레코드 전달
+  context['ti'].xcom_push(key='raw_records', value=records)
+  return records
 
 # Task 2: 정제
 def clean_data(**context):
-    # 이전 Task에서 경로 받기
-    ti = context['ti']
-    raw_path = ti.xcom_pull(key='raw_parquet_path', task_ids='collect_data')
+  # 이전 Task에서 레코드 받기
+  ti = context['ti']
+  raw_records = ti.xcom_pull(key='raw_records', task_ids='collect_data')
     
-    cleaned_path = "data/processed/cleaned_source_a_20260128.parquet"
-    ti.xcom_push(key='cleaned_parquet_path', value=cleaned_path)
-    return cleaned_path
+  cleaned_records = raw_records  # 정제 로직 적용 후 결과
+  ti.xcom_push(key='cleaned_records', value=cleaned_records)
+  return cleaned_records
 
 # Task 3: 저장
 def save_to_csv(**context):
-    ti = context['ti']
-    cleaned_path = ti.xcom_pull(key='cleaned_parquet_path', task_ids='clean_data')
+  ti = context['ti']
+  cleaned_records = ti.xcom_pull(key='cleaned_records', task_ids='clean_data')
     
-    csv_path = "data/output/source_a_20260128.csv"
-    return csv_path
+  csv_path = "data/output/source_a_20260128.csv"
+  return csv_path
 ```
 
 #### 병렬 처리 흐름 예시
@@ -539,29 +537,29 @@ def parallel_data_pipeline():
         ]
     
     @task
-    def collect(source: dict) -> str:
-        """데이터 수집"""
-        from src.collector import get_collector
-        collector = get_collector(source['name'])
-        return collector.collect()
+    def collect(source: dict) -> list[dict]:
+      """데이터 수집"""
+      from src.collector import get_collector
+      collector = get_collector(source['name'])
+      return list(collector.collect())
     
     @task
-    def clean(source: dict, raw_path: str) -> str:
-        """LLM 정제"""
-        from src.cleaners.llm_cleaner import clean_data_with_llm
-        return clean_data_with_llm(raw_path, source['task_file'])
+    def clean(source: dict, raw_records: list[dict]) -> list[dict]:
+      """LLM 정제"""
+      from src.cleaners.llm_cleaner import clean_data_with_llm
+      return clean_data_with_llm(raw_records, source['task_file'])
     
     @task
-    def save(cleaned_path: str) -> str:
-        """CSV 저장"""
-        from src.loaders.csv_loader import parquet_to_csv
-        return parquet_to_csv(cleaned_path)
+    def save(cleaned_records: list[dict]) -> str:
+      """CSV 저장"""
+      from src.loaders.csv_loader import records_to_csv
+      return records_to_csv(cleaned_records)
     
     # 병렬 실행 플로우
     sources = get_data_sources()
-    raw_paths = collect.expand(source=sources)
-    cleaned_paths = clean.expand(source=sources, raw_path=raw_paths)
-    csv_paths = save.expand(cleaned_path=cleaned_paths)
+    raw_records = collect.expand(source=sources)
+    cleaned_records = clean.expand(source=sources, raw_records=raw_records)
+    csv_paths = save.expand(cleaned_records=cleaned_records)
 
 parallel_data_pipeline()
 ```
